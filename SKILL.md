@@ -48,6 +48,7 @@ Use these exact paths for all code generation. **Do not invent paths.**
 | `SQLAlchemyCommonImplementationsRepo` | `hexcore.infrastructure.repositories.implementations` |
 | `BeanieODMCommonImplementationsRepo` | `hexcore.infrastructure.repositories.implementations` |
 | `SqlAlchemyUnitOfWork`, `NoSqlUnitOfWork` | `hexcore.infrastructure.uow` |
+| `get_repository` | `hexcore.infrastructure.uow.helpers` |
 | `get_sql_uow`, `get_nosql_uow` | `hexcore.infrastructure.api.utils` |
 | `cycle_protection_resolver` | `hexcore.infrastructure.repositories.decorators` |
 | `register_entity_on_uow` | `hexcore.infrastructure.uow.decorators` |
@@ -73,6 +74,10 @@ Use these exact paths for all code generation. **Do not invent paths.**
 4. **Interface Segregation:** Use cases depend on domain abstractions (`IBaseRepository`, `IUnitOfWork`), never on concrete infrastructure implementations.
 5. **DTO Boundary:** Every `UseCase` receives a `DTO` as input and returns a `DTO` as output. **Never** pass or return a `BaseEntity` across layer boundaries.
 6. **Service Delegation:** Use cases must delegate all business logic to **domain services**. A use case that performs business logic directly is an anti-pattern.
+7. **BaseEntity Fields:** `BaseEntity` already provides `id: UUID`, `created_at: datetime`, `updated_at: datetime`, and `is_active: bool`. **Never re-declare these fields in any subclass.**
+8. **UseCase Injection:** Use cases inject only `DomainService` instances and `UnitOfWork`. **Never inject repositories directly into a UseCase.**
+9. **Event Collection:** Domain events must be collected with `uow.collect_domain_events()` **after** `await uow.commit()`, then dispatched via `event_dispatcher`.
+10. **No Base Method Reimplementation:** `get_by_id`, `list_all`, `save`, and `delete` are already implemented by `SQLAlchemyCommonImplementationsRepo` / `BeanieODMCommonImplementationsRepo`. Only add specialized query methods (e.g., `find_by_email`).
 
 ---
 
@@ -143,35 +148,28 @@ class UserResponse(DTO):
     email: str
 
 # src/application/users/use_cases/create_user.py
-from uuid import UUID
 from hexcore.application.use_cases.base import UseCase
-from hexcore.domain.uow import IUnitOfWork
-from src.domain.users.repositories import IUserRepository
+from hexcore.infrastructure.uow import SqlAlchemyUnitOfWork
 from src.domain.users.services import UserService
 from src.application.users.dtos import CreateUserCommand, UserResponse
 
 class CreateUserUseCase(UseCase[CreateUserCommand, UserResponse]):
-    def __init__(
-        self,
-        uow: IUnitOfWork,
-        repository: IUserRepository,
-        service: UserService,
-    ) -> None:
-        self._uow = uow
-        self._repository = repository
-        self._service = service
+    def __init__(self, service: UserService, sql_uow: SqlAlchemyUnitOfWork) -> None:
+        self.uow = sql_uow
+        self.service = service
+        self.event_dispatcher = service.event_dispatcher  # obtained from the service
 
     async def execute(self, command: CreateUserCommand) -> UserResponse:
-        # 1. Delegate business logic to the domain service
-        user = await self._service.create_user(
-            name=command.name,
-            email=command.email,
-        )
-        # 2. Persist within the unit of work
-        async with self._uow:
-            saved = await self._repository.save(user)
-        # 3. Return output DTO — never a BaseEntity
-        return UserResponse(id=saved.id, name=saved.name, email=saved.email)
+        async with self.uow:
+            # 1. Delegate business logic to the domain service
+            user = await self.service.create_user(name=command.name, email=command.email)
+            # 2. Commit — persists state, triggers event tracking
+            await self.uow.commit()
+            # 3. Collect and dispatch domain events AFTER commit
+            for event in self.uow.collect_domain_events():
+                await self.event_dispatcher.dispatch(event)
+        # 4. Return output DTO — never a BaseEntity
+        return UserResponse(id=user.id, name=user.name, email=user.email)
 ```
 
 ### Domain Service Example
@@ -180,13 +178,19 @@ class CreateUserUseCase(UseCase[CreateUserCommand, UserResponse]):
 # src/domain/users/services.py
 from hexcore.domain.services import BaseDomainService
 from src.domain.users.entities import User
+from src.domain.users.repositories import IUserRepository
 from src.domain.users.events import UserCreatedEvent
 
 class UserService(BaseDomainService):
+    def __init__(self, user_repo: IUserRepository) -> None:
+        self._user_repo = user_repo
+        super().__init__()
+
     async def create_user(self, name: str, email: str) -> User:
         # All business rules live here
         user = User(name=name, email=email)
-        user.add_event(UserCreatedEvent(entity=user))
+        user.register_event(UserCreatedEvent(entity_id=user.id))
+        await self._user_repo.save(user)
         return user
 ```
 
@@ -416,6 +420,20 @@ When converting Models/Documents to Entities with nested relationships:
 
 ---
 
+## :no_entry: Blacklist (Hard Prohibitions)
+
+| Prohibition | Reason |
+| :--- | :--- |
+| Re-declaring `id`, `created_at`, `updated_at`, `is_active` in entity subclasses | Already provided by `BaseEntity` |
+| Injecting repositories directly into a `UseCase` | Violates the SOP; inject only `DomainService` + `UnitOfWork` |
+| Calling `session.commit()` outside a `UnitOfWork` | Breaks transactional integrity |
+| Calling `repo.save()` outside an `async with uow:` block | Leaves changes untracked and uncommitted |
+| Collecting domain events before `await uow.commit()` | Events may reference state that hasn't been persisted yet |
+| Reimplementing `get_by_id`, `list_all`, `save`, or `delete` in a concrete repo | These are already implemented by the base class |
+| Instantiating domain events manually inside a `UseCase` | Events must be emitted by entities and collected from the UoW |
+
+---
+
 ## :rocket: CLI Commands
 
 ```bash
@@ -451,8 +469,12 @@ Before providing code, verify:
 - [ ] Are all imports matching the **Import Registry** exactly?
 - [ ] Is the `Domain` layer free of any `Application` or `Infrastructure` imports?
 - [ ] Is every operation a **separate `UseCase` class** with `execute(command: InputDTO) -> OutputDTO`?
+- [ ] Does the `UseCase` inject **only** `DomainService` + `UnitOfWork` (no direct repository injection)?
 - [ ] Does the `UseCase` delegate business logic to a **domain service** — not implement it directly?
 - [ ] Does the `UseCase` return a `DTO` and not a `BaseEntity`?
+- [ ] Are domain events collected with `uow.collect_domain_events()` **after** `await uow.commit()`?
+- [ ] Does the entity subclass **avoid** re-declaring `id`, `created_at`, `updated_at`, or `is_active`?
+- [ ] Does the repository avoid reimplementing `get_by_id`, `list_all`, `save`, or `delete`?
 - [ ] Does the repository declare all four `HasBasicArgs` properties (`entity_cls`, `model_cls`, `not_found_exception`, `field_resolvers`)?
 - [ ] Does the repository inherit from the correct `CommonImplementationsRepo` (SQL vs NoSQL)?
 - [ ] Is `SqlAlchemyUnitOfWork` constructed with an `AsyncSession` from `async_sessionmaker`?

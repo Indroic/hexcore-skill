@@ -1,564 +1,186 @@
 ---
 name: hexcore
-description: Senior Software Architect for HexCore — a Python framework for Hexagonal Architecture and Domain-Driven Design. Use when building or reviewing code that uses HexCore.
+description: Senior architect for HexCore 9.x, the Python framework for hexagonal architecture, DDD, CQRS, background workers, event sourcing and identity. Use when writing, wiring or reviewing code that imports hexcore — entities, repositories, unit of work, FastAPI apps, command/query buses, queues, cron, event stores or Darwin authentication. Reads the installed package for its API surface instead of trusting a table, and audits existing projects for removed API and the framework's silent failure modes.
 ---
 
-# HexCore Agent Skill: Senior Software Architect
+# HexCore
 
-This skill empowers the agent to act as a Senior Architect specialized in HexCore v2.0.x, a Python framework (Python >=3.12) for Hexagonal Architecture and Domain-Driven Design.
+A reusable core for Python ≥ 3.12 applications: hexagonal architecture, DDD, CQRS and
+background tasks. It ships the abstractions **and** the infrastructure — SQL session layer,
+FastAPI factories, worker runner, dynamic cron, identity, event store, testing doubles.
 
----
-
-## :compass: Role and Objective
-
-Guide developers in building decoupled, testable, and scalable systems using HexCore. Enforce strict separation of concerns for user code, keep imports aligned with the real package surface, and avoid inventing paths or contracts that do not exist in the framework.
-
----
-
-## :books: Import Registry (Source of Truth)
-
-Use these exact paths for code generation and review. Do not invent paths.
-
-### 1. Domain Layer
-
-| Component | Import Path |
-| :--- | :--- |
-| `BaseEntity`, `AbstractModelMeta` | `hexcore.domain.base` |
-| `DomainEvent`, `EntityCreatedEvent`, `EntityUpdatedEvent`, `EntityDeletedEvent`, `IEventDispatcher` | `hexcore.domain.events` |
-| `IBaseRepository` | `hexcore.domain.repositories` |
-| `IUnitOfWork` | `hexcore.domain.uow` |
-| `BaseDomainService` | `hexcore.domain.services` |
-| `InactiveEntityException` | `hexcore.domain.exceptions` |
-| `PermissionsRegistry`, `TokenClaims` | `hexcore.domain.auth` |
-
-### 2. Application Layer
-
-| Component | Import Path |
-| :--- | :--- |
-| `DTO` | `hexcore.application.dtos.base` |
-| `UseCase` | `hexcore.application.use_cases.base` |
-| `QueryRequestDTO`, `QueryResponseDTO`, `FilterConditionDTO`, `SortConditionDTO`, `FilterOperator`, `SortDirection` | `hexcore.application.dtos.query` |
-| `QueryEntitiesUseCase`, `ListEntitiesUseCase`, `SearchEntitiesUseCase` | `hexcore.application.use_cases.query` |
-
-### 3. Infrastructure Layer
-
-| Component | Import Path |
-| :--- | :--- |
-| `BaseModel` (SQLAlchemy ORM) | `hexcore.infrastructure.repositories.orms.sqlalchemy` |
-| `BaseDocument` (Beanie ODM) | `hexcore.infrastructure.repositories.orms.beanie` |
-| `BaseSQLAlchemyRepository`, `BaseBeanieRepository` | `hexcore.infrastructure.repositories.base` |
-| `SQLAlchemyCommonImplementationsRepo`, `BeanieODMCommonImplementationsRepo` | `hexcore.infrastructure.repositories.implementations` |
-| `SqlAlchemyUnitOfWork`, `NoSqlUnitOfWork` | `hexcore.infrastructure.uow` |
-| `get_repository` | `hexcore.infrastructure.uow.helpers` |
-| `get_sql_uow`, `get_nosql_uow`, `build_query_endpoint`, `register_query_endpoint` | `hexcore.infrastructure.api.utils` |
-| `cycle_protection_resolver` | `hexcore.infrastructure.repositories.decorators` |
-| `register_entity_on_uow` | `hexcore.infrastructure.uow.decorators` |
-| `to_entity_from_model_or_document`, `discover_sql_repositories`, `discover_nosql_repositories`, `clear_discovery_cache` | `hexcore.infrastructure.repositories.utils` |
-| `init_beanie_documents` | `hexcore.infrastructure.repositories.orms.beanie.utils` |
-| `MemoryCache` | `hexcore.infrastructure.cache.cache_backends.memory` |
-| `RedisCache` | `hexcore.infrastructure.cache.cache_backends.redis` |
-| `InMemoryEventDispatcher` | `hexcore.infrastructure.events.events_backends.memory` |
-
-### 4. Configuration and Types
-
-| Component | Import Path |
-| :--- | :--- |
-| `ServerConfig`, `LazyConfig` | `hexcore.config` |
-| `FieldResolversType`, `FieldSerializersType` | `hexcore.types` |
+The design goal is that the happy path takes zero configuration: `create_app()` with no
+arguments gives a usable app, `init_engine()` with no arguments gives a production-correct
+engine.
 
 ---
 
-## :building_construction: Architectural Axioms
-
-1. Dependency rule for user code: `Infrastructure` -> `Application` -> `Domain`. Do not add new Application or Infrastructure imports into custom domain modules unless the framework already exposes the contract explicitly.
-2. Transactional integrity: all writes must happen inside `async with uow:`.
-3. Identity: entities use UUIDs via `BaseEntity`.
-4. Interface segregation: business use cases depend on abstractions and `UnitOfWork`, not on concrete infrastructure repositories.
-5. DTO boundary: business `UseCase` classes receive DTOs and return DTOs. Never pass a `BaseEntity` across an application boundary.
-6. Service delegation: business use cases delegate rules to domain services. The use case orchestrates, it does not own domain logic.
-7. Base entity fields: `BaseEntity` already provides `id`, `created_at`, `updated_at`, and `is_active`. Do not redeclare them in subclasses.
-8. Use case injection: for business use cases, inject only a domain service plus a UoW. Query use cases are the framework exception and may inject a repository through `QueryEntitiesUseCase`.
-9. Event handling: `SqlAlchemyUnitOfWork.commit()` and `NoSqlUnitOfWork.commit()` already dispatch collected domain events and then clear tracked entities. Do not manually call `dispatch_events()` or `collect_domain_events()` from application code unless you are implementing a new infrastructure adapter.
-10. Repository contract: do not reimplement `get_by_id`, `list_all`, `save`, or `delete` in concrete repositories. Add only specialized query methods.
-11. Property naming: concrete repositories must implement `entity_cls`, `model_cls` or `document_cls`, `not_found_exception`, `fields_resolvers`, and `fields_serializers` with those exact names.
-
----
-
-## :open_file_folder: Module Structure Pattern
-
-HexCore supports both hexagonal and vertical-slice layouts. These are illustrative structures, not hard requirements. Do not assume a fixed `src/` tree or a single canonical package root.
-
-### Hexagonal layout
-
-```text
-src/domain/{module}/
-  ├── entities.py
-  ├── repositories.py
-  ├── services.py
-  ├── value_objects.py
-  ├── events.py
-  ├── enums.py
-  └── exceptions.py
-
-src/application/{module}/
-  ├── dtos.py
-  └── use_cases/
-      ├── create_{entity}.py
-      ├── update_{entity}.py
-      ├── delete_{entity}.py
-      └── get_{entity}.py
-
-src/infrastructure/{module}/
-  ├── models.py
-  └── repositories.py
-```
-
-### Vertical-slice layout
-
-```text
-src/features/{module}/
-  ├── domain/
-  ├── application/
-  └── infrastructure/
-
-src/shared/
-  ├── domain/
-  ├── application/
-  └── infrastructure/
-```
-
-When generating or reviewing code, follow the repository discovery paths and package root that the project actually configures.
-If the workspace uses a flat package, a custom root, or nested feature folders, adapt the examples above instead of forcing a `src/`-based structure.
-
----
-
-## :zap: Use Case Pattern (Mandatory)
-
-Every business operation is a dedicated `UseCase` class. Avoid shared mutation use cases.
-
-### Signature Contract
-
-```python
-from hexcore.application.use_cases.base import UseCase
-from hexcore.application.dtos.base import DTO
-
-class CreateUserUseCase(UseCase["CreateUserCommand", "UserResponse"]):
-    async def execute(self, command: CreateUserCommand) -> UserResponse:
-        ...
-```
-
-- `UseCase` is generic: `UseCase[T, R]` where `T` is the input DTO and `R` is the output DTO.
-- The only public method is `async def execute(self, command: T) -> R`.
-- Business use cases must delegate business rules to a domain service.
-- The use case orchestrates service calls, persistence, and DTO mapping.
-
-### Full Business Use Case Example
-
-```python
-from uuid import UUID
-
-from hexcore.application.dtos.base import DTO
-from hexcore.application.use_cases.base import UseCase
-from hexcore.infrastructure.uow import SqlAlchemyUnitOfWork
-
-
-class CreateUserCommand(DTO):
-    name: str
-    email: str
-
-
-class UserResponse(DTO):
-    id: UUID
-    name: str
-    email: str
-
-
-class CreateUserUseCase(UseCase[CreateUserCommand, UserResponse]):
-    def __init__(self, service: UserService, uow: SqlAlchemyUnitOfWork) -> None:
-        self.service = service
-        self.uow = uow
-
-    async def execute(self, command: CreateUserCommand) -> UserResponse:
-        async with self.uow:
-            user = await self.service.create_user(name=command.name, email=command.email)
-            await self.uow.commit()
-        return UserResponse(id=user.id, name=user.name, email=user.email)
-```
-
-### Query Use Case Pattern
-
-Use this pattern for list, search, filter, sort, and pagination flows.
-
-```python
-from hexcore.application.dtos.query import QueryRequestDTO, QueryResponseDTO
-from hexcore.application.use_cases.query import QueryEntitiesUseCase
-
-
-class ListUsersUseCase(QueryEntitiesUseCase[User]):
-    async def execute(self, command: QueryRequestDTO) -> QueryResponseDTO:
-        return await super().execute(command)
-```
-
-Rules for query use cases:
-- Prefer `QueryRequestDTO` and `QueryResponseDTO` for read endpoints that need search, filters, sort, or pagination.
-- Never invent ad hoc dict payloads for query params when the query DTO already exists.
-- Use `build_query_endpoint(...)` for simple FastAPI endpoints.
-- Use `register_query_endpoint(...)` when you want to attach the endpoint directly to an `APIRouter`.
-- If the repository implements `query_all(...)`, `BaseDomainService.list_entities(...)` should prefer that path.
-- If the repository does not implement `query_all(...)`, `BaseDomainService.query_entities(...)` is the fallback.
-- Query use cases are the only supported exception to the "do not inject repositories directly" rule.
-
-### Domain Service Example
-
-```python
-from hexcore.domain.services import BaseDomainService
-
-
-class UserService(BaseDomainService):
-    def __init__(self, user_repo: IUserRepository) -> None:
-        self._user_repo = user_repo
-        super().__init__()
-
-    async def create_user(self, name: str, email: str) -> User:
-        user = User(name=name, email=email)
-        user.register_event(UserCreatedEvent(entity_id=user.id))
-        await self._user_repo.save(user)
-        return user
-```
-
----
-
-## :floppy_disk: Repository Setup: SQL
-
-### 1. ORM Model
-
-```python
-from hexcore.infrastructure.repositories.orms.sqlalchemy import BaseModel
-
-
-class UserModel(BaseModel):
-    __tablename__ = "users"
-
-    name: str
-    email: str
-```
-
-### 2. Concrete Repository Using `SQLAlchemyCommonImplementationsRepo`
-
-`SQLAlchemyCommonImplementationsRepo` expects these properties from `HasBasicArgs`:
-
-| Property | Type | Purpose |
-| :--- | :--- | :--- |
-| `entity_cls` | `type[T]` | Domain entity class |
-| `model_cls` | `type[M]` | SQLAlchemy model class |
-| `not_found_exception` | `type[Exception]` | Raised when an entity is not found |
-| `fields_resolvers` | `FieldResolversType | None` | Async resolvers for model -> entity mapping |
-| `fields_serializers` | `FieldSerializersType | None` | Custom serializers for entity -> model mapping |
-
-```python
-from hexcore.domain.uow import IUnitOfWork
-from hexcore.infrastructure.repositories.implementations import SQLAlchemyCommonImplementationsRepo
-
-
-class UserRepository(SQLAlchemyCommonImplementationsRepo[User, UserModel], IUserRepository):
-    def __init__(self, uow: IUnitOfWork) -> None:
-        super().__init__(uow)
-
-    @property
-    def entity_cls(self) -> type[User]:
-        return User
-
-    @property
-    def model_cls(self) -> type[UserModel]:
-        return UserModel
-
-    @property
-    def not_found_exception(self) -> type[Exception]:
-        return UserNotFoundException
-
-    @property
-    def fields_resolvers(self) -> FieldResolversType | None:
-        return None
-
-    @property
-    def fields_serializers(self) -> FieldSerializersType | None:
-        return None
-```
-
-### 3. Unit of Work Setup for SQLAlchemy
-
-`SqlAlchemyUnitOfWork` is built around an SQLAlchemy `AsyncSession`. Construct the session with `async_sessionmaker` and wire the UoW as a dependency.
-
-```python
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from hexcore.config import LazyConfig
-
-
-config = LazyConfig.get_config()
-engine = create_async_engine(config.async_sql_database_url, echo=config.debug)
-async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
-```
-
-```python
-from fastapi import Depends
-from hexcore.infrastructure.uow import SqlAlchemyUnitOfWork
-
-
-async def get_uow() -> AsyncGenerator[SqlAlchemyUnitOfWork, None]:
-    async with async_session_factory() as session:
-        yield SqlAlchemyUnitOfWork(session=session)
-```
-
-```python
-from fastapi import APIRouter, Depends
-
-
-router = APIRouter(prefix="/users", tags=["users"])
-
-
-@router.post("/", response_model=UserResponse)
-async def create_user(
-    command: CreateUserCommand,
-    use_case: CreateUserUseCase = Depends(get_create_user_use_case),
-) -> UserResponse:
-    return await use_case.execute(command)
-```
-
----
-
-## :floppy_disk: Repository Setup: Beanie
-
-Use `BeanieODMCommonImplementationsRepo` for MongoDB-backed repositories.
-
-### 1. Document Model
-
-```python
-from hexcore.infrastructure.repositories.orms.beanie import BaseDocument
-
-
-class UserDocument(BaseDocument):
-    name: str
-    email: str
-```
-
-### 2. Concrete Repository
-
-```python
-from hexcore.infrastructure.repositories.implementations import BeanieODMCommonImplementationsRepo
-
-
-class UserRepository(BeanieODMCommonImplementationsRepo[User, UserDocument], IUserRepository):
-    def __init__(self, uow: IUnitOfWork) -> None:
-        super().__init__(uow)
-
-    @property
-    def entity_cls(self) -> type[User]:
-        return User
-
-    @property
-    def document_cls(self) -> type[UserDocument]:
-        return UserDocument
-
-    @property
-    def not_found_exception(self) -> type[Exception]:
-        return UserNotFoundException
-
-    @property
-    def fields_resolvers(self) -> FieldResolversType | None:
-        return None
-
-    @property
-    def fields_serializers(self) -> FieldSerializersType | None:
-        return None
-```
-
-### 3. NoSQL Event Tracking
-
-Beanie repositories must track entities manually so the UoW can dispatch their domain events.
-
-- Use `uow.collect_entity(entity)` when you save an entity that emitted events.
-- Or use the `@register_entity_on_uow` decorator on repository save methods.
-
----
-
-## :wrench: ServerConfig and LazyConfig
-
-`LazyConfig.get_config()` resolves configuration in this order:
-
-1. `HEXCORE_CONFIG_MODULE`
-2. `HEXCORE_CONFIG_MODULES`
-3. modules configured with `LazyConfig.set_config_modules(...)`
-4. default module `config`
-
-The default discovery target is the root `config.py`. If you use another module path, configure it explicitly.
-
-### Recommended `ServerConfig`
-
-```python
-from pathlib import Path
-
-from pydantic import ConfigDict
-
-from hexcore.config import ServerConfig
-from hexcore.domain.events import IEventDispatcher
-from hexcore.infrastructure.cache import ICache
-from hexcore.infrastructure.cache.cache_backends.memory import MemoryCache
-from hexcore.infrastructure.events.events_backends.memory import InMemoryEventDispatcher
-
-
-class ProjectConfig(ServerConfig):
-    base_dir: Path = Path(".")
-    host: str = "0.0.0.0"
-    port: int = 8000
-    debug: bool = False
-    sql_database_url: str = "sqlite:///./db.sqlite3"
-    async_sql_database_url: str = "sqlite+aiosqlite:///./db.sqlite3"
-    mongo_database_url: str = "mongodb://localhost:27017"
-    async_mongo_database_url: str = "mongodb+async://localhost:27017"
-    mongo_db_name: str = "my_db"
-    mongo_uri: str = "mongodb://localhost:27017/my_db"
-    redis_uri: str = "redis://localhost:6379/0"
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_cache_duration: int = 300
-    allow_origins: list[str] = ["https://myapp.com"]
-    allow_credentials: bool = True
-    allow_methods: list[str] = ["*"]
-    allow_headers: list[str] = ["*"]
-    cache_backend: ICache = MemoryCache()
-    event_dispatcher: IEventDispatcher = InMemoryEventDispatcher()
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-config = ProjectConfig()
-```
-
-For production, swap `MemoryCache` for `RedisCache` and replace `InMemoryEventDispatcher` with a real broker-backed dispatcher.
-
----
-
-## :hammer_and_wrench: Additional Implementation Guidelines
-
-### Use of Resolvers
-
-When converting models or documents to entities with nested relationships:
-
-- Use `FieldResolversType` for async model/document -> entity attribute mapping.
-- Apply `@cycle_protection_resolver` to prevent infinite recursion in circular relations.
-- Use `to_entity_from_model_or_document` from `hexcore.infrastructure.repositories.utils` as the central conversion utility.
-- Pass `is_nosql=True` when converting Beanie documents.
-
-### Query Stack
-
-- Accept queries as `QueryRequestDTO` at the application boundary.
-- Prefer repository pushdown via `query_all(...)` for SQLAlchemy and Beanie repositories.
-- Fall back to `BaseDomainService.query_entities(...)` only when the repository does not implement `query_all(...)`.
-- Validate invalid filter, sort, and search field names in the API layer and surface them as HTTP 422.
-- Keep parser behavior operator-aware: `IN` and `NOT_IN` may split comma-separated values; text operators must preserve the raw string.
-- Prefer explicit search fields when available; infer them only as a fallback.
-
-### Folder-Agnostic Architecture
-
-HexCore projects may live in different layouts. Do not assume a fixed `src/` tree or a legacy package path.
-
-- Discover repositories, modules, and configuration from the actual workspace layout.
-- Prefer explicit configuration over hard-coded folder assumptions.
-- For repository discovery, honor configured discovery paths first.
-- Do not introduce legacy fallback behavior unless compatibility is explicitly requested.
-- Keep imports aligned with the discovered package root and avoid inventing paths.
-- For CLI and bootstrap flows, generate structures that work in both hexagonal and vertical-slice layouts.
-
-### Unit of Work Logic
-
-- `SqlAlchemyUnitOfWork` automatically tracks entities via `session.new`, `session.dirty`, and `session.deleted` once `set_domain_entity()` has been used on the ORM model.
-- `NoSqlUnitOfWork` requires explicit entity tracking via `uow.collect_entity(entity)` or `@register_entity_on_uow`.
-- UoW commit is the place where events are dispatched; application code should not replicate that workflow.
-
-### Event-Driven Architecture
-
-1. Entities emit `DomainEvent` subclasses through `BaseEntity`.
-2. Use cases trigger domain behavior and then call `await uow.commit()`.
-3. The UoW dispatches collected events after commit.
-4. Domain events must remain infrastructure-agnostic.
-5. Configure the dispatcher in `ServerConfig.event_dispatcher`.
-
-### Caching
-
-- Use the `ICache` interface.
-- Swap `MemoryCache` for `RedisCache` without changing application code.
-- Configure the active backend in `ServerConfig.cache_backend`.
-- Inject cache through dependency injection; do not instantiate it inside domain or application layers.
-
----
-
-## :no_entry: Blacklist (Hard Prohibitions)
-
-| Prohibition | Reason |
-| :--- | :--- |
-| Re-declaring `id`, `created_at`, `updated_at`, or `is_active` in entity subclasses | Already provided by `BaseEntity` |
-| Injecting repositories directly into business `UseCase` classes | Business use cases should depend on domain services plus a UoW |
-| Treating the query use case exception as a rule for mutation use cases | `QueryEntitiesUseCase` is a read-side helper only |
-| Calling `session.commit()` outside a `UnitOfWork` | Breaks transactional integrity |
-| Calling `repo.save()` outside an `async with uow:` block | Leaves changes untracked and uncommitted |
-| Manually calling `dispatch_events()` or `collect_domain_events()` from application code | The UoW already owns commit-time event dispatch |
-| Reimplementing `get_by_id`, `list_all`, `save`, or `delete` in a concrete repo | Already implemented by the base class |
-| Instantiating domain events manually inside a `UseCase` | Events should be emitted by entities and persisted through the UoW flow |
-| Assuming `hexcore.infrastructure.cache.cache_backends` reexports the concrete cache classes | Import the concrete backend modules directly |
-
----
-
-## :rocket: CLI Commands
+## Before writing anything: pin the version
+
+HexCore has shipped **nine majors**, twice by accident from a `feat!:` commit in a docs PR.
+The API of 2.x is not the API of 9.x — most of it was deleted in 7.0. Never answer from
+memory about what exists.
 
 ```bash
-hexcore init                   # Scaffold a new project
-hexcore create-domain-module   # Generate 7 standard files for a new domain module
-hexcore make-migrations        # Generate Alembic migration scripts
-hexcore migrate                # Apply pending database migrations
-hexcore test                   # Run pytest suite
+python scripts/hexcore_surface.py --version
 ```
 
-`hexcore init` supports the `hexagonal` and `vertical-slice` templates.
+- **On 9.x** — this skill's prose applies.
+- **Below 9** — read `references/removed-api.md` first. Names taught here may not exist there.
+- **Above 9** — trust `--facade` and `--find` over any table in this skill. They read the
+  installed package; the tables are prose.
 
 ---
 
-## :gear: Development Workflow
+## Do not recall imports. Look them up.
 
-1. Define the entity in `domain/{module}/entities.py`.
-2. Define the repository interface in `domain/{module}/repositories.py`.
-3. Define the domain service in `domain/{module}/services.py`.
-4. Create input and output DTOs in `application/{module}/dtos.py`.
-5. Implement one `UseCase` per business operation in `application/{module}/use_cases/`.
-6. Use `QueryEntitiesUseCase` for read/list/search/filter/sort/pagination flows.
-7. Create `BaseModel` or `BaseDocument` in infrastructure.
-8. Implement a concrete repository using `SQLAlchemyCommonImplementationsRepo` or `BeanieODMCommonImplementationsRepo`.
-9. Configure `config = ServerConfig(...)` in the root `config.py` or another module selected by `LazyConfig`.
-10. Wire dependencies in FastAPI router factories.
-11. Run `hexcore make-migrations` and `hexcore migrate` when the schema changes.
-12. Write tests for domain behavior, repository discovery, and query flows.
-13. Run `hexcore test`.
+The import registry is not written down anywhere in this skill, on purpose: a written table
+is what went stale across seven majors and left the previous version teaching
+`SQLAlchemyCommonImplementationsRepo`, deleted in 7.0.
+
+```bash
+python scripts/hexcore_surface.py --find SqlAlchemyRepository   # facade, long path, extra
+python scripts/hexcore_surface.py --facade cqrs                 # everything one facade exports
+python scripts/hexcore_surface.py --deprecated                  # what dies in the next major
+```
+
+These parse the package's `_EXPORTS` dicts with `ast` — no import, so they work with **zero
+extras installed** and cannot be wrong about the version in front of you.
 
 ---
 
-## :mag: Validation Checklist for the Agent
+## The five facades
 
-Before providing code, verify:
+One module per task. They re-export the public surface **without moving anything**: the long
+paths keep working and return the same object.
 
-- [ ] Do all imports match the Import Registry exactly?
-- [ ] Is custom domain code free of unnecessary Application or Infrastructure imports?
-- [ ] Is every business operation a dedicated `UseCase` class with `execute(command: InputDTO) -> OutputDTO`?
-- [ ] Does the business use case inject only a domain service plus a UoW?
-- [ ] Does the use case delegate business logic to a domain service?
-- [ ] Does the use case return a DTO and not a `BaseEntity`?
-- [ ] For query flows, is `QueryRequestDTO` used at the boundary and `QueryEntitiesUseCase` used appropriately?
-- [ ] Are UoW writes wrapped in `async with uow:`?
-- [ ] Does the UoW commit path own event dispatch rather than the application layer?
-- [ ] Does the entity subclass avoid redeclaring base fields?
-- [ ] Does the repository avoid reimplementing base CRUD methods?
-- [ ] Does the repository declare the exact property names `entity_cls`, `model_cls` or `document_cls`, `not_found_exception`, `fields_resolvers`, and `fields_serializers`?
-- [ ] Does the repository inherit from the correct common implementation class for SQL or NoSQL?
-- [ ] Is `SqlAlchemyUnitOfWork` built from an `AsyncSession` created by `async_sessionmaker`?
-- [ ] If using Beanie, is `is_nosql=True` passed to the entity converter?
-- [ ] For NoSQL repositories, are entities tracked with `uow.collect_entity()` or `@register_entity_on_uow`?
-- [ ] Is `config = ServerConfig(...)` defined in the default root module or a module resolved by `LazyConfig`?
-- [ ] Is the configured event dispatcher appropriate for the target environment?
+```python
+import hexcore.fastapi as hx           # [api]        create_app, lifespan, health, routers
+import hexcore.cqrs as cqrs            # no extras    messages, buses, worker, cron
+import hexcore.sql as sql              # [sql]        engine, scopes, UoW, query DTOs
+import hexcore.eventsourcing as es     # per adapter  store, aggregates, projections
+import hexcore.darwin as darwin        # [darwin]     identity
+```
+
+All five resolve names **lazily** (PEP 562): `import hexcore.cqrs` works on a bare install,
+and `cqrs.SqlAlchemyCronJobRepository` demands `[sql]` only at the moment you ask for it.
+Each ships a generated `.pyi`, so the types are real despite the lazy loading.
+
+Things that are deliberately **not** on a facade — `hexcore.config`, `hexcore.testing`,
+`hexcore.domain.base`, `hexcore.application.use_cases.*`, `hexcore.infrastructure.uow`, the
+distributed buses and the queue adapters — are imported by their long path. They are niche,
+and a short name would suggest they are part of the happy path. `--find` knows where they are.
+
+---
+
+## Route by task
+
+| You were asked to | Read | Then |
+| :-- | :-- | :-- |
+| Model an entity, repository, UoW, migrations | `references/core.md` | `assets/templates/repository.py` |
+| Build or wire a FastAPI app | `references/fastapi.md` | `assets/templates/config.py` |
+| Commands, queries, handlers, buses, middleware | `references/cqrs-workers-cron.md` | `assets/templates/handler.py` |
+| Background work, queues, workers, scheduled jobs | `references/cqrs-workers-cron.md` | `assets/templates/worker.py` |
+| Persist facts, aggregates, projections, an outbox | `references/event-sourcing.md` | — |
+| Authentication, sessions, permissions, plugins | `references/darwin.md` | — |
+| Write tests | `references/testing.md` | `assets/templates/conftest.py` |
+| **Review** existing code | `references/review-rubric.md` | `scripts/hexcore_audit.py` |
+| Upgrade a project from 2.x–8.x | `references/removed-api.md` | `scripts/hexcore_audit.py` |
+| Debug a symptom you can see | `references/failure-modes.md` | — |
+| Follow a step-by-step recipe | `references/workflows.md` | — |
+
+Read the one file the task needs. They are written to be read whole, and not to be read together.
+
+---
+
+## Non-negotiables
+
+These are the rules that introspection cannot tell you, because they are about *how* to use
+the API rather than what it is called.
+
+1. **Repositories need three properties, not five.** `entity_cls`, `model_cls` (or
+   `document_cls`), `not_found_exception`. `fields_serializers` and `fields_resolvers` are
+   **optional** — add them only for fields the automatic conversion cannot handle.
+2. **Never reimplement the base CRUD.** `get_by_id`, `get_active_by_id`, `list_all`,
+   `query_all`, `query_cursor`, `save`, `delete` come from the generic repository. Add
+   specialised queries only. And `delete()` is a **soft** delete.
+3. **`repository_discovery_paths` is explicit and required.** The UoW discovers repositories
+   from it and **fails to build** when the set is empty. It does not guess by folder
+   convention — that tied the framework to one layout and failed silently on any other.
+4. **Every write goes inside `async with uow:`**, and the UoW owns event dispatch: it
+   collects domain events *before* committing and publishes them *after*. Application code
+   never calls `dispatch_events()` or `collect_domain_events()`.
+5. **Outside a request, use scopes, not dependencies.** `hx.get_session` and `hx.get_sql_uow`
+   are FastAPI dependencies and work nowhere else. Workers, cron, scripts and seeds use
+   `sql.session_scope()`, `sql.uow_scope()`, `sql.open_uow_scope()`, `sql.nosql_uow_scope()`.
+6. **`get_sql_uow` yields the UoW *not entered*;** `get_sql_uow_open` yields it entered. The
+   use case opens its own `async with self.uow:` — that is why the default does not.
+7. **Alembic's `env.py` needs three calls**: `ensure_framework_models_loaded()`,
+   `ensure_identity_schema_loaded(plugins=[...])` if you use Darwin, and
+   `import_all_models(models)`. Omitting one emits `op.drop_table` against a table with data
+   in it, in a migration that generates cleanly. This is the framework's worst failure mode
+   **because nothing raises**.
+8. **Events dispatch by hierarchy since 9.0.** A handler subscribed to a base class receives
+   its subclasses. Before 9.0 it received nothing and did not fail either.
+9. **`UseCase` is not deprecated.** It is still the right abstraction for orchestrating
+   without a bus; `cqrs.UseCaseCommandHandler` adapts one into a handler. Use the bus when you
+   need middleware, Smart Routing or a queue — not as a blanket upgrade.
+10. **Entities do not redeclare `id`, `created_at`, `updated_at` or `is_active`.**
+    `BaseEntity` provides all four.
+11. **One `init_beanie` call.** It does not accumulate: a second call against the same
+    database replaces the first call's registry. Every document — yours, identity's, the
+    plugins' — goes in the same call.
+12. **CORS: `"*"` with `allow_credentials=True` is never valid.** Declare real origins when
+    you use session cookies.
+
+House conventions worth keeping, that the framework does not enforce: a dedicated class per
+business operation, DTOs at application boundaries (never a `BaseEntity`), and business rules
+in a domain service rather than in the orchestrator. Note that HexCore's own examples inject
+the UoW straight into a CQRS handler — that is idiomatic, not a violation.
+
+---
+
+## Never emit these
+
+Deleted in 7.0. They resolve to nothing — not a deprecation warning, an `ImportError`.
+
+| Do not write | Write instead |
+| :-- | :-- |
+| `SQLAlchemyCommonImplementationsRepo` | `SqlAlchemyRepository` |
+| `BeanieODMCommonImplementationsRepo` | `BeanieRepository` |
+| `NoSqlUnitOfWork` | `BeanieUnitOfWork` |
+| `IEventDispatcher`, `InMemoryEventDispatcher` | `AbstractEventBus`, `cqrs.InMemoryEventBus` |
+| `ICommandBus`, `IQueryBus`, `IEventBus` | `AbstractCommandBus`, `AbstractQueryBus`, `AbstractEventBus` |
+| `ICommandHandler`, `IQueryHandler` | `AbstractCommandHandler`, `AbstractQueryHandler` |
+| `IMiddleware`, `ISerializer` | `AbstractMiddleware`, `AbstractSerializer` |
+| `ServerConfig(event_dispatcher=...)` | `ServerConfig(event_bus=...)` — the old name raises `ValueError` |
+| `bus.register(...)` / `bus.dispatch(...)` for events | `bus.subscribe(...)` / `bus.publish(...)` |
+| `reset_sqlalchemy_engine()` | `dispose_engine()` |
+| `MiddlewareConfig` | nothing — it was dead code, removed in 3.0 |
+
+Deprecated in 9.0 and removed in 10.0: `hexcore.domain.events.EventBus`, the whole
+`hexcore.infrastructure.events` package, and `hexcore.domain.auth.{PermissionsRegistry,
+TokenClaims}`. Run `--deprecated` for the live list. Full detail and the silent behaviour
+changes: `references/removed-api.md`.
+
+---
+
+## Before you hand code back
+
+```bash
+python scripts/hexcore_surface.py --check path/to/changed_file.py
+```
+
+Every `from hexcore… import …` and every `hx.` / `cqrs.` / `sql.` / `es.` / `darwin.`
+attribute is resolved against the installed package. This is the same gate HexCore runs over
+its own documentation, and it is the difference between believing an import exists and
+knowing it does.
+
+When you touched or reviewed existing code:
+
+```bash
+python scripts/hexcore_audit.py src/ --fail-on high
+```
+
+Report what it finds. A clean audit is worth stating; an unreported critical is the migration
+that drops a table.
